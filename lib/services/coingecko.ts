@@ -1442,7 +1442,7 @@ export async function calculateMACrossovers(
     // 1000 coins / 50 batch = 20 batches. 
     // We can probably run 2-3 batches concurrently.
 
-    const parallelBatches = IS_PRO ? 3 : 1;
+    const parallelBatches = IS_PRO ? 2 : 1;
 
     for (let i = 0; i < coins.length; i += (batchSize * parallelBatches)) {
       // Create chunks for this iteration
@@ -1454,17 +1454,23 @@ export async function calculateMACrossovers(
         }
       }
 
-      console.log(`   🚀 Processing ${currentBatches.length} batches concurrently (${processedCount}/${coins.length} coins)...`);
+      console.log(`   🚀 Processing ${currentBatches.length} batches (${processedCount}/${coins.length} coins)...`);
 
-      // Process all chunks in parallel
-      const batchPromises = currentBatches.map(async (batch) => {
-        const bResults = await Promise.all(
-          batch.map(coin => processCoinWithOHLC(coin, timeframe))
-        );
-        return bResults;
-      });
-
-      const parallelResults = await Promise.all(batchPromises);
+      // Process all chunks with sequential control
+      const parallelResults = [];
+      for(const batch of currentBatches) {
+         try {
+            const bResults = await Promise.all(
+              batch.map(coin => processCoinWithOHLC(coin, timeframe).catch(e => {
+                console.warn(`⚠️ Error processing ${coin.symbol}:`, e.message);
+                return null;
+              }))
+            );
+            parallelResults.push(bResults);
+         } catch(e) {
+            console.error("❌ Batch processing failure:", e);
+         }
+      }
 
       // Flatten and add
       parallelResults.forEach(batchRes => {
