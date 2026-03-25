@@ -558,11 +558,14 @@ function SignalsTerminal({
 
       const now = Date.now();
       const existingSignals = new Map<string, SignalData>();
-      signals.forEach(s => existingSignals.set(`${s.coinId}-${s.signalType}`, s));
+      // Only keep existing signals if they match the current timeframe
+      signals
+        .filter(s => s.timeframe === timeframe)
+        .forEach(s => existingSignals.set(`${s.coinId}-${s.signalType}-${s.crossoverTimestamp}`, s));
 
       const newIds = new Set<string>();
       const updatedSignals: SignalData[] = newData.map(s => {
-        const key = `${s.coinId}-${s.signalType}`;
+        const key = `${s.coinId}-${s.signalType}-${s.crossoverTimestamp}`;
         const existing = existingSignals.get(key);
         if (!existing) newIds.add(key);
 
@@ -574,8 +577,12 @@ function SignalsTerminal({
       });
 
       // Merge updated signals back into the main list
-      updatedSignals.forEach(s => existingSignals.set(`${s.coinId}-${s.signalType}`, s));
-      const finalSignals = Array.from(existingSignals.values()).sort((a, b) => b.timestamp - a.timestamp);
+      updatedSignals.forEach(s => existingSignals.set(`${s.coinId}-${s.signalType}-${s.crossoverTimestamp}`, s));
+      const finalSignals = Array.from(existingSignals.values()).sort((a, b) => {
+        const timeB = b.crossoverTimestamp || b.timestamp || 0;
+        const timeA = a.crossoverTimestamp || a.timestamp || 0;
+        return timeB - timeA;
+      });
 
       setSignals(finalSignals);
 

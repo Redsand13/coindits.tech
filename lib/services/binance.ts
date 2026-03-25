@@ -1,4 +1,5 @@
 import { MASignal, getBinanceCoinMapping, calculateEMAArray, detectCrossover, calculateVolatilityScore, fetchBinanceKlines, BINANCE_TO_COINGECKO, findCoinMetadata, fetchTopCoins } from "./coingecko";
+import db from "../db";
 
 const BINANCE_FAPI_BASE = "https://fapi.binance.com/fapi/v1";
 
@@ -151,7 +152,7 @@ export async function getBinanceFuturesSignals(
           t.symbol.endsWith("USDT") && parseFloat(t.quoteVolume) > 10000000,
       )
       .sort((a, b) => parseFloat(b.quoteVolume) - parseFloat(a.quoteVolume))
-      .slice(0, 100); // Analyze top 100 pairs with high volume
+      .slice(0, 150); // Analyze top 150 pairs with high volume now that Short Reversal is removed
 
     const signals: MASignal[] = [];
 
@@ -359,6 +360,45 @@ export async function getBinanceFuturesSignals(
     validSignals.sort((a, b) => b.crossoverTimestamp - a.crossoverTimestamp);
 
     console.log(`✅ Found ${validSignals.length} Binance Futures signals (${validSignals.filter(s => s.signalType === 'BUY').length} BUY, ${validSignals.filter(s => s.signalType === 'SELL').length} SELL)`);
+
+    // 💾 Persist to signal_history table
+    try {
+      const stmt = db.prepare(`
+        INSERT OR IGNORE INTO signal_history (
+          id, coin_id, symbol, name, image, signal_type, signal_name, timeframe, 
+          score, price, crossover_timestamp, first_seen, metadata
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+
+      const insertMany = db.transaction((signals: MASignal[]) => {
+        for (const s of signals) {
+          const uniqueId = `${s.coinId}-${s.signalType}-${s.crossoverTimestamp}`;
+          const metadata = JSON.stringify({
+            volatility: s.volatility,
+            volatilityTooltip: s.volatilityTooltip,
+            formula: s.formula,
+            ema7: s.ema7,
+            ema99: s.ema99,
+            ema7Prev: s.ema7Prev,
+            ema99Prev: s.ema99Prev,
+            crossoverStrength: s.crossoverStrength,
+            change24h: s.change24h,
+            volume24h: s.volume24h
+          });
+
+          stmt.run(
+            uniqueId, s.coinId, s.symbol, s.name, s.image, 
+            s.signalType, s.signalName, timeframe, 
+            s.score, s.price, s.crossoverTimestamp, Date.now(), metadata
+          );
+        }
+      });
+
+      insertMany(validSignals);
+      console.log(`💾 Persisted ${validSignals.length} signals to history DB`);
+    } catch (err) {
+      console.error("❌ Failed to persist signals to history DB:", err);
+    }
 
     // Cache results
     binanceSignalsCache = {

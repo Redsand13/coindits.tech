@@ -9,7 +9,6 @@ import {
 import type { MASignal } from "@/lib/services/coingecko";
 import { getAdvancedSignalsAction as getAdvancedSignalsService } from "@/lib/services/advanced-algo";
 import type { Timeframe } from "@/lib/services/advanced-algo";
-import { scanShortReversalSignals } from "@/lib/services/short-reversal";
 import { withCache } from "@/lib/utils/cache";
 import db from "@/lib/db";
 import bcrypt from "bcryptjs";
@@ -152,17 +151,6 @@ export async function getAdvancedSignalsAction(exchangeId?: string, timeframe: s
   return await getAdvancedSignalsService(exchangeId, timeframe);
 }
 
-export async function getShortReversalSignalsAction(timeframe: Timeframe = "1h", exchange: string = "binance", limit: number = 80) {
-  return withCache(`short_reversal_${timeframe}_${exchange}_${limit}`, async () => {
-    try {
-      const signals = await scanShortReversalSignals(timeframe, exchange, limit);
-      return signals;
-    } catch (error) {
-      console.error("Error in getShortReversalSignalsAction:", error);
-      return [];
-    }
-  }, 60000, true); // Cache for 10 min, Persistent
-}
 
 export async function getTop10Coins() {
   return withCache("top_10_coins_persist", async () => {
@@ -180,16 +168,14 @@ export async function getLandingPageData() {
   return withCache("landing_page_data_persist", async () => {
     try {
       // Parallel fetch with DASHBOARD limits for speed
-      const [marketStats, top10Coins, reversals] = await Promise.all([
+      const [marketStats, top10Coins] = await Promise.all([
         getMarketSnapshot(),
-        getTop10Coins(),
-        getShortReversalSignalsAction("1d", "binance", 40) // Limit to 40 for dashboard count
+        getTop10Coins()
       ]);
 
       return {
         stats: marketStats,
         topCoins: top10Coins,
-        reversalCount: reversals.length,
         timestamp: Date.now()
       };
     } catch (error) {
@@ -219,5 +205,37 @@ export async function registerUser(formData: any) {
   } catch (error) {
     console.error("Error registering user:", error);
     return { error: "Failed to register user" };
+  }
+}
+export async function getBinanceHistoryAction(filters?: { timeframe?: string; searchQuery?: string }) {
+  try {
+    let query = "SELECT * FROM signal_history WHERE 1=1";
+    const params: any[] = [];
+
+    if (filters?.timeframe && filters.timeframe !== "all") {
+      query += " AND timeframe = ?";
+      params.push(filters.timeframe);
+    }
+
+    if (filters?.searchQuery) {
+      query += " AND (symbol LIKE ? OR name LIKE ?)";
+      params.push(`%${filters.searchQuery}%`, `%${filters.searchQuery}%`);
+    }
+
+    query += " ORDER BY crossover_timestamp DESC LIMIT 1000";
+
+    const rows = db.prepare(query).all(...params) as any[];
+
+    return rows.map(row => {
+      const metadata = JSON.parse(row.metadata || "{}");
+      return {
+        ...row,
+        ...metadata,
+        timestamp: row.crossover_timestamp, // For compatibility
+      };
+    });
+  } catch (error) {
+    console.error("Error fetching binance history:", error);
+    return [];
   }
 }

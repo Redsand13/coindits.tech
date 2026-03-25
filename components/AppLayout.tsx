@@ -94,7 +94,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
                 { name: "Exchange Futures", href: "/exchange-futures" },
                 { name: "Market Overview", href: "/futures" },
                 { name: "Advanced Signals", href: "/advanced-signals" },
-                { name: "Short Reversal", href: "/short-reversal" }
+                { name: "Binance History", href: "/binance-history" }
               ].map((link) => (
                 <Link key={link.href} href={link.href}>
                   <Button
@@ -197,13 +197,6 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
                 <Zap size={20} />
               </div>
               <span className={cn("text-[10px] font-semibold uppercase tracking-tight", pathname === "/advanced-signals" ? "text-primary" : "text-muted-foreground")}>Signals</span>
-            </Link>
-
-            <Link href="/short-reversal" className="flex flex-col items-center gap-1 w-full h-full justify-center">
-              <div className={cn("p-1.5 rounded-lg transition-colors", pathname === "/short-reversal" ? "bg-primary/10 text-primary" : "text-muted-foreground")}>
-                <TrendingDown size={20} />
-              </div>
-              <span className={cn("text-[10px] font-semibold uppercase tracking-tight", pathname === "/short-reversal" ? "text-primary" : "text-muted-foreground")}>Reversal</span>
             </Link>
           </>
         ) : (

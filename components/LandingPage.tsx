@@ -150,7 +150,6 @@ const NarrativePills = () => {
         { text: "Latest Macro Signals", color: "bg-indigo-500/10 text-indigo-400 border-indigo-500/20" },
         { text: "Bullish Accumulation Zones", color: "bg-green-500/10 text-green-400 border-green-500/20" },
         { text: "Institutional Order Flow", color: "bg-primary/10 text-primary border-primary/20" },
-        { text: "High Probability Reversals", color: "bg-orange-500/10 text-orange-400 border-orange-500/20" },
         { text: "Volatility Heatmap", color: "bg-red-500/10 text-red-400 border-red-500/20" },
     ];
     return (
@@ -227,7 +226,6 @@ const CoinRow = ({ coin, index }: { coin: any, index: number }) => {
 export default function LandingPage({ initialData }: { initialData: any }) {
     const [stats, setStats] = useState<any>(initialData?.stats || null);
     const [topCoins, setTopCoins] = useState<any[]>(initialData?.topCoins || []);
-    const [reversalCount, setReversalCount] = useState(initialData?.reversalCount || 0);
     const [loading, setLoading] = useState(!initialData);
 
     useEffect(() => {
@@ -237,7 +235,6 @@ export default function LandingPage({ initialData }: { initialData: any }) {
                 if (data) {
                     setStats(data.stats);
                     setTopCoins(data.topCoins);
-                    setReversalCount(data.reversalCount);
                 }
                 setLoading(false);
             };
@@ -276,14 +273,6 @@ export default function LandingPage({ initialData }: { initialData: any }) {
                             type="gauge"
                             title="Signal Pressure"
                             value={Math.round((stats?.bullishCount / (stats?.tokensTotal || 1)) * 100) || 45}
-                        />
-                        <BentoCard
-                            index={3}
-                            title="Short Reversals"
-                            value={reversalCount || "0"}
-                            change="DETECTED"
-                            trend="neutral"
-                            chartData={[10, 8, 12, 11, 10]}
                         />
                         <BentoCard
                             index={4}

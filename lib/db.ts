@@ -65,6 +65,22 @@ try {
       image TEXT,
       created_at INTEGER
     );
+    CREATE TABLE IF NOT EXISTS signal_history (
+      id TEXT PRIMARY KEY,
+      coin_id TEXT,
+      symbol TEXT,
+      name TEXT,
+      image TEXT,
+      signal_type TEXT,
+      signal_name TEXT,
+      timeframe TEXT,
+      score INTEGER,
+      price REAL,
+      crossover_timestamp INTEGER,
+      first_seen INTEGER,
+      metadata TEXT,
+      created_at INTEGER DEFAULT (strftime('%s', 'now'))
+    );
   `);
 
   console.log('✅ SQLite Database initialized at ' + dbPath);

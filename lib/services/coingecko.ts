@@ -971,21 +971,6 @@ async function processCoinWithOHLC(
     // Extract close prices from OHLC data
     // OHLC format: [timestamp, open, high, low, close]
     let series = ohlcData.map((candle) => candle[4]); // close price
-
-    // 🚀 ULTRA-FRESH TRADING: Inject absolute latest price from 1-minute snapshot DB
-    // This ensures that even for 1h or 1d timeframes, the signal updates EVERY MINUTE
-    const latestPrice = coin.current_price;
-    const lastOHLCPrice = series[series.length - 1];
-    const lastOHLCTime = ohlcData[ohlcData.length - 1][0];
-    const now = Date.now();
-
-    // If the latest snapshot price is different from last candle or the candle is old,
-    // we append it as the current "live" data point.
-    // This makes the scanner reactive to minute-level moves on ANY timeframe.
-    if (latestPrice && latestPrice !== lastOHLCPrice) {
-      series.push(latestPrice);
-    }
-
     // Filter out invalid prices
     const validPrices = series.filter((p) => p && p > 0 && !isNaN(p));
 
@@ -1014,12 +999,6 @@ async function processCoinWithOHLC(
     if (timeframe === "1h") lookback = 24;
     if (timeframe === "4h") lookback = 6;
     if (timeframe === "1d") lookback = 2;
-
-    // IMPORTANT: Since we added a "Live" price point, lookback should include index 0 (the new point)
-    // detectCrossover usually looks at index i and i-1. 
-    // If the crossover JUST happened because of the minute-level move, candlesAgo will be 0.
-    lookback += 1;
-
 
     // Detect crossover in last 24h
     const crossover = detectCrossover(ema7Array, ema99Array, lookback);
