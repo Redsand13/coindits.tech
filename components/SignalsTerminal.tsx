@@ -574,10 +574,11 @@ function SignalsTerminal({
           const firstNew = updatedSignals.find(s => newIds.has(`${s.coinId}-${s.signalType}`));
           if (firstNew) {
             console.log(`🔔 Alert triggering for ${firstNew.symbol}`);
-            triggerAlert(
-              `New Signal: ${firstNew.symbol}`,
-              `${firstNew.signalType} setup detected at $${firstNew.currentPrice.toFixed(4)}`
-            );
+            const timeStr = new Date(firstNew.crossoverTimestamp || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            const title = `[${firstNew.signalType}] ${firstNew.symbol} - ${firstNew.signalName}`;
+            const message = `${firstNew.name || firstNew.symbol} | Price: $${firstNew.currentPrice?.toFixed(4) || firstNew.price?.toFixed(4)} | TF: ${firstNew.timeframe || timeframe} | Detected: ${timeStr}`;
+            
+            triggerAlert(title, message);
           }
         }
       }
