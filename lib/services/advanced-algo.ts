@@ -1,5 +1,20 @@
 
 import { MASignal, fetchTopCoins } from "./coingecko";
+import { getBinanceBanStatus } from "./binance";
+
+/** fetch with a timeout — prevents hung connections from blocking batches */
+async function fetchSafe(url: string, options: RequestInit = {}, timeoutMs = 8000): Promise<Response> {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+        return await fetch(url, { ...options, signal: ctrl.signal });
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+/** sleep helper for inter-batch pacing */
+const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 
 // --- CONFIGURATION ---
 const CONFIG = {
@@ -29,7 +44,7 @@ export interface OHLCV {
 
 // --- CACHE ---
 const signalsCache = new Map<string, { data: AdvancedSignal[], timestamp: number }>();
-const CACHE_DURATION = 90 * 1000; // 90 seconds cache to keep data fresh but snappy
+const CACHE_DURATION = 3 * 60 * 1000; // 3 minutes — reduces API request frequency significantly
 
 export type AdvancedSignal = {
     symbol: string;
@@ -311,9 +326,9 @@ const COINBASE_GRANULARITY: Record<string, number> = {
 
 // --- EXCHANGE IMPLEMENTATIONS ---
 
-async function fetchBinanceKlines(symbol: string, interval: string, limit: number = 500): Promise<OHLCV[]> {
+async function fetchBinanceKlines(symbol: string, interval: string, limit: number = 300): Promise<OHLCV[]> {
     try {
-        const res = await fetch(`https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`);
+        const res = await fetchSafe(`https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`);
         if (!res.ok) return [];
         const data = await res.json();
         return data.map((d: any) => ({
@@ -355,7 +370,7 @@ function scanHistoricalWindows(
 
 async function fetchCoinbaseKlines(productId: string, granularity: number): Promise<OHLCV[]> {
     try {
-        const res = await fetch(`https://api.exchange.coinbase.com/products/${productId}/candles?granularity=${granularity}`, {
+        const res = await fetchSafe(`https://api.exchange.coinbase.com/products/${productId}/candles?granularity=${granularity}`, {
             headers: { 'User-Agent': 'Coinpree/1.0' }
         });
         if (!res.ok) return [];
@@ -372,6 +387,14 @@ async function fetchCoinbaseKlines(productId: string, granularity: number): Prom
 }
 
 async function getBinanceSignals(selectedTf: string): Promise<AdvancedSignal[]> {
+    // Short-circuit immediately if IP is banned
+    const ban = getBinanceBanStatus();
+    if (ban.banned) {
+        const until = ban.banUntil ? new Date(ban.banUntil).toUTCString() : "unknown";
+        console.warn(`🚫 [advanced-algo] Binance IP banned until ${until} — skipping Binance scan`);
+        return [];
+    }
+
     const tf = TIMEFRAME_MAP[selectedTf] || TIMEFRAME_MAP["15m"];
 
     // Fetch coin metadata for images — never let this crash the whole scan
@@ -380,40 +403,37 @@ async function getBinanceSignals(selectedTf: string): Promise<AdvancedSignal[]> 
 
     let pairs: string[] = [];
     try {
-        const res = await fetch("https://fapi.binance.com/fapi/v1/ticker/24hr", { next: { revalidate: 60 } });
+        const res = await fetchSafe("https://fapi.binance.com/fapi/v1/ticker/24hr", { next: { revalidate: 60 } } as RequestInit);
         if (res.ok) {
             const data = await res.json();
-            // Get top 80 coins by volume to expand coverage
-            pairs = data.filter((t: any) => t.symbol.endsWith("USDT") && parseFloat(t.quoteVolume) > 20000000)
+            pairs = data
+                .filter((t: any) => t.symbol.endsWith("USDT") && parseFloat(t.quoteVolume) > 50000000)
                 .sort((a: any, b: any) => parseFloat(b.quoteVolume) - parseFloat(a.quoteVolume))
-                .slice(0, 80).map((t: any) => t.symbol);
+                .slice(0, 30)  // Top 30 only — keeps well under rate limits
+                .map((t: any) => t.symbol);
         }
     } catch (e) { return []; }
 
     const results: AdvancedSignal[] = [];
-    const BATCH_SIZE = 15; // Increased batch size
+    const BATCH_SIZE = 5; // Small batches to avoid bursting
 
-    // Batch processing to respect rate limits gently
     for (let i = 0; i < pairs.length; i += BATCH_SIZE) {
         const batch = pairs.slice(i, i + BATCH_SIZE);
         await Promise.all(batch.map(async (p) => {
             try {
-                // 500 candles gives ~5 days of 15m history for backfill
-                const candles = await fetchBinanceKlines(p, tf.main, 500);
+                const candles = await fetchBinanceKlines(p, tf.main, 300);
                 const baseSymbol = p.replace("USDT", "");
                 const link = `https://www.binance.com/en/futures/${p}`;
                 const image = imageMap.get(baseSymbol) || `https://ui-avatars.com/api/?name=${baseSymbol}&background=random`;
 
-                // Current signal (from last candle)
                 const sig = analyzePair(baseSymbol, candles, "BINANCE", link, image);
                 if (sig) results.push(sig);
 
-                // Historical signals (previous days) — stored to DB via persistAdvancedSignals
                 const historical = scanHistoricalWindows(baseSymbol, candles, "BINANCE", link, image);
                 for (const h of historical) results.push(h);
             } catch (e) { }
         }));
-        await new Promise(r => setTimeout(r, 50)); // Reduced delay
+        await sleep(400); // 400ms between batches — 30 pairs / 5 = 6 batches × 400ms = ~2.4s total
     }
 
     return results.sort((a, b) => b.score - a.score);
@@ -502,7 +522,7 @@ async function fetchBybitKlines(symbol: string, interval: string, limit: number 
         if (interval === "4h") bybitInterval = "240";
         if (interval === "1d") bybitInterval = "D";
 
-        const res = await fetch(`https://api.bybit.com/v5/market/kline?category=linear&symbol=${symbol}&interval=${bybitInterval}&limit=${limit}`);
+        const res = await fetchSafe(`https://api.bybit.com/v5/market/kline?category=linear&symbol=${symbol}&interval=${bybitInterval}&limit=${limit}`);
         if (!res.ok) return [];
         const json = await res.json();
 
@@ -528,7 +548,7 @@ async function fetchBitgetKlines(symbol: string, interval: string, limit: number
         // Checking standard docs: 1m, 3m, 5m, 15m, 30m, 1H, 2H, 4H, 6H, 12H, 1D, 1W
         if (interval === "1d") bgInterval = "1D";
 
-        const res = await fetch(`https://api.bitget.com/api/v2/mix/market/candles?symbol=${symbol}&granularity=${bgInterval}&limit=${limit}&productType=USDT-FUTURES`);
+        const res = await fetchSafe(`https://api.bitget.com/api/v2/mix/market/candles?symbol=${symbol}&granularity=${bgInterval}&limit=${limit}&productType=USDT-FUTURES`);
         if (!res.ok) return [];
         const json = await res.json();
 
@@ -569,13 +589,13 @@ async function getBybitSignals(selectedTf: string): Promise<AdvancedSignal[]> {
     } catch (e) { }
 
     const results: AdvancedSignal[] = [];
-    const BATCH_SIZE = 15;
+    const BATCH_SIZE = 8;
 
     for (let i = 0; i < pairs.length; i += BATCH_SIZE) {
         const batch = pairs.slice(i, i + BATCH_SIZE);
         await Promise.all(batch.map(async (p) => {
             try {
-                const candles = await fetchBybitKlines(p, tf.main, 500);
+                const candles = await fetchBybitKlines(p, tf.main, 300);
                 const baseSymbol = p.replace("USDT", "");
                 const link = `https://www.bybit.com/trade/usdt/${p}`;
                 const image = imageMap.get(baseSymbol) || `https://ui-avatars.com/api/?name=${baseSymbol}&background=random`;
@@ -587,7 +607,7 @@ async function getBybitSignals(selectedTf: string): Promise<AdvancedSignal[]> {
                 for (const h of historical) results.push(h);
             } catch (e) { }
         }));
-        await new Promise(r => setTimeout(r, 50));
+        await sleep(300);
     }
     return results.sort((a, b) => b.score - a.score);
 }
@@ -615,13 +635,13 @@ async function getBitgetSignals(selectedTf: string): Promise<AdvancedSignal[]> {
     } catch (e) { }
 
     const results: AdvancedSignal[] = [];
-    const BATCH_SIZE = 15;
+    const BATCH_SIZE = 8;
 
     for (let i = 0; i < pairs.length; i += BATCH_SIZE) {
         const batch = pairs.slice(i, i + BATCH_SIZE);
         await Promise.all(batch.map(async (p) => {
             try {
-                const candles = await fetchBitgetKlines(p, tf.main, 500);
+                const candles = await fetchBitgetKlines(p, tf.main, 300);
                 const baseSymbol = p.replace("USDT", "");
                 const link = `https://www.bitget.com/futures/usdt/${p}`;
                 const image = imageMap.get(baseSymbol) || `https://ui-avatars.com/api/?name=${baseSymbol}&background=random`;
@@ -633,7 +653,7 @@ async function getBitgetSignals(selectedTf: string): Promise<AdvancedSignal[]> {
                 for (const h of historical) results.push(h);
             } catch (e) { }
         }));
-        await new Promise(r => setTimeout(r, 50));
+        await sleep(300);
     }
 
     return results.sort((a, b) => b.score - a.score);

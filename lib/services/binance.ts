@@ -180,7 +180,7 @@ let binanceSignalsCache: {
   timestamp: number;
   timeframe: string;
 } | null = null;
-const BINANCE_CACHE_DURATION = 30000; // 30 seconds
+const BINANCE_CACHE_DURATION = 5 * 60 * 1000; // 5 minutes
 
 export async function getBinanceFuturesSignals(
   timeframe: string = "1h",
@@ -234,15 +234,15 @@ export async function getBinanceFuturesSignals(
     const topPairs = tickers
       .filter(
         (t) =>
-          t.symbol.endsWith("USDT") && parseFloat(t.quoteVolume) > 10000000,
+          t.symbol.endsWith("USDT") && parseFloat(t.quoteVolume) > 50000000,
       )
       .sort((a, b) => parseFloat(b.quoteVolume) - parseFloat(a.quoteVolume))
-      .slice(0, 150); // Analyze top 150 pairs with high volume now that Short Reversal is removed
+      .slice(0, 50); // Top 50 high-volume pairs — well within rate limits
 
     const signals: MASignal[] = [];
 
-    // Process pairs in parallel batches for speed
-    const batchSize = 20; // Process 20 pairs at once
+    // Small batches with delays to stay under Binance rate limits
+    const batchSize = 8;
     type BatchResult = { signal: MASignal | null; historical: Array<{ coinId: string; symbol: string; name: string; image: string; signalType: "BUY" | "SELL"; signalName: string; price: number; crossoverTimestamp: number; change24h: number; volume24h: number }> };
     const results: BatchResult[] = [];
 
@@ -449,9 +449,9 @@ export async function getBinanceFuturesSignals(
       const batchResults = await Promise.all(batchPromises);
       results.push(...batchResults);
 
-      // Small delay between batches to avoid rate limits
+      // Pace batches: 50 pairs / 8 per batch = ~7 batches × 350ms ≈ 2.5s total
       if (i + batchSize < topPairs.length) {
-        await new Promise((resolve) => setTimeout(resolve, 50));
+        await new Promise((resolve) => setTimeout(resolve, 350));
       }
     }
 
