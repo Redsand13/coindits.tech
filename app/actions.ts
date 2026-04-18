@@ -148,6 +148,15 @@ export async function getBinanceFuturesSignalsAction(timeframe: string = "1h") {
   }
 }
 
+export async function getBinanceBanStatusAction(): Promise<{ banned: boolean; banUntil: number | null }> {
+  try {
+    const { getBinanceBanStatus } = await import("@/lib/services/binance");
+    return getBinanceBanStatus();
+  } catch {
+    return { banned: false, banUntil: null };
+  }
+}
+
 // ─── helpers (sync, better-sqlite3 is synchronous) ───────────────────────────
 
 function persistAdvancedSignals(signals: AdvancedSignal[], exchange: string, timeframe: string) {

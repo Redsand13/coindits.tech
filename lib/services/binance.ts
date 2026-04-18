@@ -3,6 +3,16 @@ import db from "../db";
 
 const BINANCE_FAPI_BASE = "https://fapi.binance.com/fapi/v1";
 
+// ── IP ban tracking ───────────────────────────────────────────────────────────
+// Binance returns 418 with a ban-until timestamp when an IP is blocked.
+// We store it here so every subsequent call short-circuits without hitting the wire.
+let _ipBanUntil = 0;
+
+export function getBinanceBanStatus(): { banned: boolean; banUntil: number | null } {
+  if (_ipBanUntil > Date.now()) return { banned: true, banUntil: _ipBanUntil };
+  return { banned: false, banUntil: null };
+}
+
 /** fetch with a timeout so slow/hung connections don't block forever */
 async function fetchWithTimeout(url: string, options: RequestInit & { timeoutMs?: number } = {}): Promise<Response> {
   const { timeoutMs = 10000, ...fetchOptions } = options;
@@ -15,19 +25,42 @@ async function fetchWithTimeout(url: string, options: RequestInit & { timeoutMs?
   }
 }
 
-/** retry a fetch up to `retries` times on 429 / 5xx */
-async function fetchWithRetry(url: string, options: RequestInit & { timeoutMs?: number } = {}, retries = 3): Promise<Response> {
+/** fetch with retry on 429 — detects IP bans (418) and blocks further requests */
+async function fetchWithRetry(url: string, options: RequestInit & { timeoutMs?: number } = {}, retries = 2): Promise<Response> {
+  // If already IP-banned, fail immediately without touching the network
+  if (_ipBanUntil > Date.now()) {
+    const banDate = new Date(_ipBanUntil).toUTCString();
+    throw new Error(`Binance IP ban active until ${banDate}. Skipping request.`);
+  }
+
   for (let attempt = 0; attempt <= retries; attempt++) {
     const res = await fetchWithTimeout(url, options);
     if (res.ok) return res;
+
+    const body = await res.text().catch(() => "");
+
+    // 418 = IP banned — parse and store the expiry, stop retrying immediately
+    if (res.status === 418) {
+      try {
+        const json = JSON.parse(body);
+        if (typeof json.msg === "string") {
+          const match = json.msg.match(/banned until (\d+)/);
+          if (match) _ipBanUntil = parseInt(match[1], 10);
+        }
+      } catch { /* ignore parse errors */ }
+      const banDate = _ipBanUntil ? new Date(_ipBanUntil).toUTCString() : "unknown";
+      throw new Error(`Binance IP banned until ${banDate}. Too many REST requests — switch to WebSocket.`);
+    }
+
+    // 429 = rate limited — back off and retry
     if (res.status === 429 && attempt < retries) {
-      const wait = Math.pow(2, attempt) * 1000; // 1s, 2s, 4s
+      const wait = Math.pow(2, attempt) * 2000; // 2s, 4s
       console.warn(`⚠️ Binance rate limited (429), retrying in ${wait}ms…`);
       await new Promise(r => setTimeout(r, wait));
       continue;
     }
-    const body = await res.text().catch(() => "");
-    throw new Error(`Binance API error ${res.status} ${res.statusText}: ${body.slice(0, 200)}`);
+
+    throw new Error(`Binance API ${res.status} ${res.statusText}: ${body.slice(0, 200)}`);
   }
   throw new Error("fetchWithRetry exhausted retries");
 }
@@ -153,6 +186,12 @@ export async function getBinanceFuturesSignals(
   timeframe: string = "1h",
 ): Promise<MASignal[]> {
   try {
+    // Short-circuit immediately if IP is banned — no network requests
+    if (_ipBanUntil > Date.now()) {
+      console.warn(`🚫 Binance IP ban active — skipping all requests until ${new Date(_ipBanUntil).toUTCString()}`);
+      return [];
+    }
+
     // Check cache
     const now = Date.now();
     if (
