@@ -142,7 +142,8 @@ export async function getBinanceFuturesSignalsAction(timeframe: string = "1h") {
     const { getBinanceFuturesSignals } = await import("@/lib/services/binance");
     return await getBinanceFuturesSignals(timeframe);
   } catch (error) {
-    console.error("Error fetching Binance signals:", error);
+    const msg = error instanceof Error ? error.message : String(error);
+    console.error(`[getBinanceFuturesSignalsAction] ${msg}`);
     return [];
   }
 }

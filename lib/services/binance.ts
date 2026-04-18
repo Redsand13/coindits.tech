@@ -3,6 +3,35 @@ import db from "../db";
 
 const BINANCE_FAPI_BASE = "https://fapi.binance.com/fapi/v1";
 
+/** fetch with a timeout so slow/hung connections don't block forever */
+async function fetchWithTimeout(url: string, options: RequestInit & { timeoutMs?: number } = {}): Promise<Response> {
+  const { timeoutMs = 10000, ...fetchOptions } = options;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...fetchOptions, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** retry a fetch up to `retries` times on 429 / 5xx */
+async function fetchWithRetry(url: string, options: RequestInit & { timeoutMs?: number } = {}, retries = 3): Promise<Response> {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const res = await fetchWithTimeout(url, options);
+    if (res.ok) return res;
+    if (res.status === 429 && attempt < retries) {
+      const wait = Math.pow(2, attempt) * 1000; // 1s, 2s, 4s
+      console.warn(`⚠️ Binance rate limited (429), retrying in ${wait}ms…`);
+      await new Promise(r => setTimeout(r, wait));
+      continue;
+    }
+    const body = await res.text().catch(() => "");
+    throw new Error(`Binance API error ${res.status} ${res.statusText}: ${body.slice(0, 200)}`);
+  }
+  throw new Error("fetchWithRetry exhausted retries");
+}
+
 // Scans the full EMA arrays and returns EVERY crossover point (not just the most recent)
 function detectAllCrossoversInData(
   ema7Array: number[],
@@ -154,10 +183,10 @@ export async function getBinanceFuturesSignals(
     const interval = intervalMap[timeframe] || "1h";
 
     // 1. Fetch 24h ticker to get volume and list of pairs
-    const tickerRes = await fetch(`${BINANCE_FAPI_BASE}/ticker/24hr`, {
+    const tickerRes = await fetchWithRetry(`${BINANCE_FAPI_BASE}/ticker/24hr`, {
       next: { revalidate: 60 },
-    });
-    if (!tickerRes.ok) throw new Error("Failed to fetch Binance tickers");
+      timeoutMs: 15000,
+    } as RequestInit);
 
     const tickers: BinanceTicker[] = await tickerRes.json();
 
@@ -187,8 +216,9 @@ export async function getBinanceFuturesSignals(
         const empty: BatchResult = { signal: null, historical: [] };
         try {
           // Fetch 1500 candles for full historical coverage (~15 days on 15m)
-          const klineRes = await fetch(
+          const klineRes = await fetchWithTimeout(
             `${BINANCE_FAPI_BASE}/klines?symbol=${pair.symbol}&interval=${interval}&limit=1500`,
+            { timeoutMs: 10000 } as RequestInit,
           );
           if (!klineRes.ok) return empty;
 
