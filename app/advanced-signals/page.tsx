@@ -1,4 +1,3 @@
-import { getAdvancedSignalsAction } from "@/app/actions";
 import AdvancedSignalsTerminal from "@/components/AdvancedSignalsTerminal";
 
 export const dynamic = "force-dynamic";

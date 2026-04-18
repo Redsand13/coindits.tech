@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import { useState, useMemo } from "react";
+import * as XLSX from "xlsx";
 import {
   Search,
   Download,
@@ -115,7 +116,7 @@ export default function BinanceHistory({ initialData = [] }: { initialData?: any
   // Export Logic
   const performExport = () => {
     const headers = ["#", "Date", "Time", "Asset", "Signal", "TF", "Score", "Price", "24h %", "Volume", "EMA7", "EMA99", "Gap"];
-    const csvRows = modalFilteredData.map((row, index) => [
+    const rows = modalFilteredData.map((row, index) => [
         index + 1,
         new Date(row.crossover_timestamp).toLocaleDateString(),
         new Date(row.crossover_timestamp).toLocaleTimeString(),
@@ -131,12 +132,24 @@ export default function BinanceHistory({ initialData = [] }: { initialData?: any
         row.crossoverStrength
     ]);
 
-    const csvContent = [headers.join(","), ...csvRows.map(r => r.join(","))].join("\n");
-    const blob = new Blob([csvContent], { type: 'text/csv' });
-    const url = URL.createObjectURL(blob);
+    const filename = `Signal_History_${new Date().toISOString().split('T')[0]}`;
     const link = document.createElement("a");
-    link.href = url;
-    link.download = `Signal_History_${modalFormat}_${new Date().toISOString().split('T')[0]}.csv`;
+
+    if (modalFormat === "xlsx") {
+      const ws = XLSX.utils.aoa_to_sheet([headers, ...rows]);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, "Signals");
+      const buf = XLSX.write(wb, { bookType: "xlsx", type: "array" });
+      const blob = new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+      link.href = URL.createObjectURL(blob);
+      link.download = `${filename}.xlsx`;
+    } else {
+      const csvContent = [headers.join(","), ...rows.map(r => r.join(","))].join("\n");
+      const blob = new Blob([csvContent], { type: "text/csv" });
+      link.href = URL.createObjectURL(blob);
+      link.download = `${filename}.csv`;
+    }
+
     link.click();
     setShowExportModal(false);
   };
@@ -243,7 +256,7 @@ export default function BinanceHistory({ initialData = [] }: { initialData?: any
             </TableHeader>
             <TableBody>
               {currentItems.map((item, idx) => (
-                <TableRow key={item.id} className="border-slate-50 hover:bg-slate-50/30 transition-colors h-16 group">
+                <TableRow key={item.id ?? `row-${(currentPage - 1) * itemsPerPage + idx}`} className="border-slate-50 hover:bg-slate-50/30 transition-colors h-16 group">
                   <TableCell className="text-center font-bold text-slate-300 text-[11px]">{(currentPage - 1) * itemsPerPage + idx + 1}</TableCell>
                   <TableCell className="pl-6">
                     <div className="flex flex-col">

@@ -191,11 +191,8 @@ function analyzePair(symbol: string, klines: OHLCV[], exchange: string, link: st
     const rsi = calculateRSI(c, 14);
     const atr = calculateATR(h, l, c, 14);
 
-    // 2. Structure
-    const swings = findSwingPoints(h, l, 5);
-    const lastHighSwing = swings.reverse().find(s => s.type === "HIGH"); // Most recent high
-    const lastLowSwing = swings.find(s => s.type === "LOW");   // Most recent low
-    // Note: swings was reversed, so find returns the 'latest' one found in the original reversed list
+    // 2. Structure — reverse so .find() returns the most recent match first
+    const swings = findSwingPoints(h, l, 5).reverse();
 
     // 3. Current State
     const currPrice = c[len - 1];

@@ -8,7 +8,7 @@ import {
 } from "@/lib/services/coingecko";
 import type { MASignal } from "@/lib/services/coingecko";
 import { getAdvancedSignalsAction as getAdvancedSignalsService } from "@/lib/services/advanced-algo";
-import type { AdvancedSignal, Timeframe } from "@/lib/services/advanced-algo";
+import type { AdvancedSignal } from "@/lib/services/advanced-algo";
 import { withCache } from "@/lib/utils/cache";
 import db from "@/lib/db";
 import bcrypt from "bcryptjs";
@@ -267,7 +267,7 @@ export async function registerUser(formData: any) {
     }
 
     const hashedPassword = await bcrypt.hash(password, 10);
-    const userId = Math.random().toString(36).substring(2, 15); // Simple ID for demo
+    const userId = uuidv4();
 
     db.prepare("INSERT INTO users (id, name, email, password, created_at) VALUES (?, ?, ?, ?, ?)")
       .run(userId, name, email, hashedPassword, Date.now());
