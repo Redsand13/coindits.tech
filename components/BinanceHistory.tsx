@@ -210,6 +210,7 @@ export default function BinanceHistory({ initialData = [] }: { initialData?: any
                 <option value="all">All TFs</option>
                 <option value="5m">5 Minute</option>
                 <option value="15m">15 Minute</option>
+                <option value="30m">30 Minute</option>
                 <option value="1h">1 Hour</option>
                 <option value="4h">4 Hour</option>
                 <option value="1d">1 Day</option>
@@ -357,6 +358,7 @@ export default function BinanceHistory({ initialData = [] }: { initialData?: any
                                     <select value={modalTimeframe} onChange={(e) => setModalTimeframe(e.target.value)} className="w-full h-8 bg-white border-b border-slate-100 text-[12px] font-bold text-slate-700 outline-none appearance-none cursor-pointer">
                                         <option value="all">All Timeframes</option>
                                         <option value="15m">15 Minute</option>
+                                        <option value="30m">30 Minute</option>
                                         <option value="1h">1 Hour</option>
                                         <option value="4h">4 Hour</option>
                                         <option value="1d">1 Day</option>

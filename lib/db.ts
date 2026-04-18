@@ -81,6 +81,24 @@ try {
       metadata TEXT,
       created_at INTEGER DEFAULT (strftime('%s', 'now'))
     );
+
+    CREATE TABLE IF NOT EXISTS advanced_signals (
+      id TEXT PRIMARY KEY,
+      symbol TEXT NOT NULL,
+      exchange TEXT NOT NULL,
+      timeframe TEXT NOT NULL,
+      signal_type TEXT NOT NULL,
+      entry_price REAL NOT NULL,
+      stop_loss REAL NOT NULL,
+      take_profit REAL NOT NULL,
+      rr_ratio REAL NOT NULL,
+      score INTEGER NOT NULL,
+      reason TEXT NOT NULL,
+      image TEXT,
+      link TEXT,
+      detected_at INTEGER NOT NULL,
+      created_at INTEGER DEFAULT (strftime('%s', 'now') * 1000)
+    );
   `);
 
   console.log('✅ SQLite Database initialized at ' + dbPath);

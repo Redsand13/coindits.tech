@@ -314,7 +314,7 @@ const COINBASE_GRANULARITY: Record<string, number> = {
 
 // --- EXCHANGE IMPLEMENTATIONS ---
 
-async function fetchBinanceKlines(symbol: string, interval: string, limit: number = 200): Promise<OHLCV[]> {
+async function fetchBinanceKlines(symbol: string, interval: string, limit: number = 500): Promise<OHLCV[]> {
     try {
         const res = await fetch(`https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`);
         if (!res.ok) return [];
@@ -328,6 +328,32 @@ async function fetchBinanceKlines(symbol: string, interval: string, limit: numbe
             volume: parseFloat(d[5]),
         }));
     } catch (e) { return []; }
+}
+
+/**
+ * Slide a 200-candle window over historical klines and collect every signal detected.
+ * This backfills the DB with signals that occurred in previous days.
+ */
+function scanHistoricalWindows(
+    symbol: string,
+    klines: OHLCV[],
+    exchange: string,
+    link: string,
+    image?: string,
+): AdvancedSignal[] {
+    const MIN_WINDOW = 200;
+    if (klines.length <= MIN_WINDOW) return [];
+
+    const signals: AdvancedSignal[] = [];
+    // Step every 48 candles (~12h on 15m, ~2d on 1h) to catch each distinct signal
+    const step = 48;
+
+    for (let end = MIN_WINDOW; end < klines.length - step; end += step) {
+        const slice = klines.slice(0, end);
+        const sig = analyzePair(symbol, slice, exchange, link, image);
+        if (sig) signals.push(sig);
+    }
+    return signals;
 }
 
 async function fetchCoinbaseKlines(productId: string, granularity: number): Promise<OHLCV[]> {
@@ -351,8 +377,8 @@ async function fetchCoinbaseKlines(productId: string, granularity: number): Prom
 async function getBinanceSignals(selectedTf: string): Promise<AdvancedSignal[]> {
     const tf = TIMEFRAME_MAP[selectedTf] || TIMEFRAME_MAP["15m"];
 
-    // Fetch coin metadata for images
-    const coins = await fetchTopCoins();
+    // Fetch coin metadata for images — never let this crash the whole scan
+    const coins = await fetchTopCoins().catch(() => []);
     const imageMap = new Map(coins.map((c: any) => [c.symbol.toUpperCase(), c.image]));
 
     let pairs: string[] = [];
@@ -375,12 +401,19 @@ async function getBinanceSignals(selectedTf: string): Promise<AdvancedSignal[]> 
         const batch = pairs.slice(i, i + BATCH_SIZE);
         await Promise.all(batch.map(async (p) => {
             try {
-                const candles = await fetchBinanceKlines(p, tf.main, 200);
+                // 500 candles gives ~5 days of 15m history for backfill
+                const candles = await fetchBinanceKlines(p, tf.main, 500);
                 const baseSymbol = p.replace("USDT", "");
+                const link = `https://www.binance.com/en/futures/${p}`;
                 const image = imageMap.get(baseSymbol) || `https://ui-avatars.com/api/?name=${baseSymbol}&background=random`;
 
-                const sig = analyzePair(baseSymbol, candles, "BINANCE", `https://www.binance.com/en/futures/${p}`, image);
+                // Current signal (from last candle)
+                const sig = analyzePair(baseSymbol, candles, "BINANCE", link, image);
                 if (sig) results.push(sig);
+
+                // Historical signals (previous days) — stored to DB via persistAdvancedSignals
+                const historical = scanHistoricalWindows(baseSymbol, candles, "BINANCE", link, image);
+                for (const h of historical) results.push(h);
             } catch (e) { }
         }));
         await new Promise(r => setTimeout(r, 50)); // Reduced delay
@@ -393,8 +426,7 @@ async function getCoinbaseSignals(selectedTf: string): Promise<AdvancedSignal[]>
     const tf = TIMEFRAME_MAP[selectedTf] || TIMEFRAME_MAP["15m"];
     const gran = COINBASE_GRANULARITY[tf.main] || 900;
 
-    // Fetch images
-    const coins = await fetchTopCoins();
+    const coins = await fetchTopCoins().catch(() => []);
     const imageMap = new Map(coins.map((c: any) => [c.symbol.toUpperCase(), c.image]));
 
     let products = ["BTC-USD", "ETH-USD", "SOL-USD", "DOGE-USD", "XRP-USD", "ADA-USD", "AVAX-USD", "LINK-USD", "LTC-USD", "SHIB-USD"];
@@ -424,9 +456,13 @@ async function getCoinbaseSignals(selectedTf: string): Promise<AdvancedSignal[]>
             try {
                 const candles = await fetchCoinbaseKlines(p, gran);
                 const baseSymbol = p.split("-")[0];
+                const link = `https://www.coinbase.com/advanced-trade/spot/${p}`;
                 const image = imageMap.get(baseSymbol) || `https://ui-avatars.com/api/?name=${baseSymbol}&background=random`;
-                const sig = analyzePair(baseSymbol, candles, "COINBASE", `https://www.coinbase.com/advanced-trade/spot/${p}`, image);
+                const sig = analyzePair(baseSymbol, candles, "COINBASE", link, image);
                 if (sig) results.push(sig);
+
+                const historical = scanHistoricalWindows(baseSymbol, candles, "COINBASE", link, image);
+                for (const h of historical) results.push(h);
             } catch (e) { }
         }));
         await new Promise(r => setTimeout(r, 300));
@@ -440,7 +476,7 @@ async function getCoinbaseIntlSignals(selectedTf: string): Promise<AdvancedSigna
     const tf = TIMEFRAME_MAP[selectedTf] || TIMEFRAME_MAP["15m"];
     const gran = COINBASE_GRANULARITY[tf.main] || 900;
 
-    const coins = await fetchTopCoins();
+    const coins = await fetchTopCoins().catch(() => []);
     const imageMap = new Map(coins.map((c: any) => [c.symbol.toUpperCase(), c.image]));
 
     // Use slightly different major pairs that are popular on Perps
@@ -515,7 +551,7 @@ async function fetchBitgetKlines(symbol: string, interval: string, limit: number
 async function getBybitSignals(selectedTf: string): Promise<AdvancedSignal[]> {
     const tf = TIMEFRAME_MAP[selectedTf] || TIMEFRAME_MAP["15m"];
 
-    const coins = await fetchTopCoins();
+    const coins = await fetchTopCoins().catch(() => []);
     const imageMap = new Map(coins.map((c: any) => [c.symbol.toUpperCase(), c.image]));
 
     let pairs = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "SUIUSDT", "PEPEUSDT"];
@@ -542,12 +578,16 @@ async function getBybitSignals(selectedTf: string): Promise<AdvancedSignal[]> {
         const batch = pairs.slice(i, i + BATCH_SIZE);
         await Promise.all(batch.map(async (p) => {
             try {
-                const candles = await fetchBybitKlines(p, tf.main, 200);
+                const candles = await fetchBybitKlines(p, tf.main, 500);
                 const baseSymbol = p.replace("USDT", "");
+                const link = `https://www.bybit.com/trade/usdt/${p}`;
                 const image = imageMap.get(baseSymbol) || `https://ui-avatars.com/api/?name=${baseSymbol}&background=random`;
 
-                const sig = analyzePair(baseSymbol, candles, "BYBIT", `https://www.bybit.com/trade/usdt/${p}`, image);
+                const sig = analyzePair(baseSymbol, candles, "BYBIT", link, image);
                 if (sig) results.push(sig);
+
+                const historical = scanHistoricalWindows(baseSymbol, candles, "BYBIT", link, image);
+                for (const h of historical) results.push(h);
             } catch (e) { }
         }));
         await new Promise(r => setTimeout(r, 50));
@@ -558,7 +598,7 @@ async function getBybitSignals(selectedTf: string): Promise<AdvancedSignal[]> {
 async function getBitgetSignals(selectedTf: string): Promise<AdvancedSignal[]> {
     const tf = TIMEFRAME_MAP[selectedTf] || TIMEFRAME_MAP["15m"];
 
-    const coins = await fetchTopCoins();
+    const coins = await fetchTopCoins().catch(() => []);
     const imageMap = new Map(coins.map((c: any) => [c.symbol.toUpperCase(), c.image]));
 
     let pairs = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "SUIUSDT", "PEPEUSDT"];
@@ -584,12 +624,16 @@ async function getBitgetSignals(selectedTf: string): Promise<AdvancedSignal[]> {
         const batch = pairs.slice(i, i + BATCH_SIZE);
         await Promise.all(batch.map(async (p) => {
             try {
-                const candles = await fetchBitgetKlines(p, tf.main, 200);
+                const candles = await fetchBitgetKlines(p, tf.main, 500);
                 const baseSymbol = p.replace("USDT", "");
+                const link = `https://www.bitget.com/futures/usdt/${p}`;
                 const image = imageMap.get(baseSymbol) || `https://ui-avatars.com/api/?name=${baseSymbol}&background=random`;
 
-                const sig = analyzePair(baseSymbol, candles, "BITGET", `https://www.bitget.com/futures/usdt/${p}`, image);
+                const sig = analyzePair(baseSymbol, candles, "BITGET", link, image);
                 if (sig) results.push(sig);
+
+                const historical = scanHistoricalWindows(baseSymbol, candles, "BITGET", link, image);
+                for (const h of historical) results.push(h);
             } catch (e) { }
         }));
         await new Promise(r => setTimeout(r, 50));
@@ -603,28 +647,30 @@ export async function getAdvancedSignalsAction(exchangeId: string = "binance_fut
     const cached = signalsCache.get(cacheKey);
 
     if (cached && (Date.now() - cached.timestamp) < CACHE_DURATION) {
-        console.log(`📦 Returning cached signals for ${cacheKey}`);
         return cached.data;
     }
 
-    let results: AdvancedSignal[] = [];
+    try {
+        let results: AdvancedSignal[] = [];
 
-    if (exchangeId === "coinbase") {
-        const [spotSignals, futuresSignals] = await Promise.all([
-            getCoinbaseSignals(timeframe),
-            getCoinbaseIntlSignals(timeframe)
-        ]);
-        results = [...spotSignals, ...futuresSignals].sort((a, b) => b.score - a.score);
-    } else if (exchangeId === "bybit") {
-        results = await getBybitSignals(timeframe);
-    } else if (exchangeId === "bitget") {
-        results = await getBitgetSignals(timeframe);
-    } else {
-        // Default to Binance Futures
-        results = await getBinanceSignals(timeframe);
+        if (exchangeId === "coinbase") {
+            const [spotSignals, futuresSignals] = await Promise.all([
+                getCoinbaseSignals(timeframe),
+                getCoinbaseIntlSignals(timeframe)
+            ]);
+            results = [...spotSignals, ...futuresSignals].sort((a, b) => b.score - a.score);
+        } else if (exchangeId === "bybit") {
+            results = await getBybitSignals(timeframe);
+        } else if (exchangeId === "bitget") {
+            results = await getBitgetSignals(timeframe);
+        } else {
+            results = await getBinanceSignals(timeframe);
+        }
+
+        signalsCache.set(cacheKey, { data: results, timestamp: Date.now() });
+        return results;
+    } catch (error) {
+        console.error(`[advanced-algo] getAdvancedSignalsAction failed for ${cacheKey}:`, error);
+        return [];
     }
-
-    // Update cache
-    signalsCache.set(cacheKey, { data: results, timestamp: Date.now() });
-    return results;
 }

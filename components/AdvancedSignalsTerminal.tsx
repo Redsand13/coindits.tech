@@ -9,8 +9,10 @@ import {
     BellOff,
     HelpCircle,
     Copy,
-    Clock,
     Filter,
+    TrendingUp,
+    TrendingDown,
+    Database,
 } from "lucide-react";
 import { useAlertSystem } from "@/lib/hooks/useAlertSystem";
 import { cn } from "@/lib/utils";
@@ -35,7 +37,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Card, CardContent } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
 import { toast } from "sonner";
-import { getAdvancedSignalsAction } from "@/app/actions";
+import { getAdvancedSignalsAction, getStoredAdvancedSignalsAction } from "@/app/actions";
 import { TinyCandle } from "@/components/ui/sparkline";
 import type { AdvancedSignal, Timeframe } from "@/lib/services/advanced-algo";
 
@@ -58,44 +60,25 @@ const TIMEFRAMES: Timeframe[] = ["5m", "15m", "30m", "1h", "2h", "4h", "1d"];
 const SignalRow = memo(({
     signal,
     idx,
-    signalHistoryMap,
     onClick
 }: {
     signal: AdvancedSignal,
     idx: number,
-    signalHistoryMap: Record<string, { firstSeen: number, lastUpdate: number }>,
     onClick: () => void
 }) => {
-    const uniqueKey = `${signal.symbol}-${signal.type}`;
-    const history = signalHistoryMap[uniqueKey];
-
     return (
         <TableRow
             className="group hover:bg-muted/40 transition-colors border-border/40 cursor-pointer text-sm"
             onClick={onClick}
         >
-            <TableCell className="pl-6 py-2.5 w-[110px] min-w-[110px]">
+            <TableCell className="pl-6 py-2.5 w-[140px] min-w-[140px]">
                 <div className="flex flex-col gap-0.5">
-                    <span className="font-mono text-xs font-bold text-foreground">
-                        {new Date(signal.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                    <span className="font-mono text-[10px] text-muted-foreground leading-tight">
+                        {new Date(signal.timestamp).toLocaleDateString([], { month: 'short', day: 'numeric' })}
                     </span>
-                    <div className="flex flex-col text-[9px] text-muted-foreground/60">
-                        {history && (
-                            <div className="flex items-center gap-1.5 translate-y-[1px]">
-                                <div className="flex items-center gap-1">
-                                    <Clock className="w-2.5 h-2.5 opacity-50" />
-                                    <span>{new Date(history.firstSeen).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
-                                </div>
-                                {new Date(history.lastUpdate).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) !==
-                                    new Date(history.firstSeen).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) && (
-                                        <div className="flex items-center gap-1">
-                                            <RefreshCw className="w-2.5 h-2.5 opacity-50" />
-                                            <span>{new Date(history.lastUpdate).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
-                                        </div>
-                                    )}
-                            </div>
-                        )}
-                    </div>
+                    <span className="font-mono text-xs font-bold text-foreground">
+                        {new Date(signal.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                    </span>
                 </div>
             </TableCell>
             <TableCell className="py-2.5 font-medium w-[220px] min-w-[220px]">
@@ -204,75 +187,105 @@ export default function AdvancedSignalsTerminal({
     const [loading, setLoading] = useState(false);
     const [searchQuery, setSearchQuery] = useState("");
     const [timeframe, setTimeframe] = useState<Timeframe>("15m");
-    const [lastUpdate, setLastUpdate] = useState<Date | null>(null);
-    const [signalHistoryMap, setSignalHistoryMap] = useState<Record<string, { firstSeen: number, lastUpdate: number }>>({});
+    const [filterType, setFilterType] = useState<"ALL" | "BUY" | "SELL">("ALL");
+    const [minScore, setMinScore] = useState<number>(60);
+    const [historyLoaded, setHistoryLoaded] = useState(false);
+    const [loadingHistory, setLoadingHistory] = useState(false);
     const { enabled: alertsEnabled, toggleAlerts, triggerAlert } = useAlertSystem();
 
-    const fetchSignals = async (exchangeId: string) => {
-        // Initial load bypasses hidden check if it contains "-init"
-        // Also allow background scanning if alerts are enabled
+    // Dedup helper — keyed by symbol+type+minute-bucket so stored→live never double-adds
+    const mergeSignals = useCallback((incoming: AdvancedSignal[], existing: AdvancedSignal[]) => {
+        const existingKeys = new Set(
+            existing.map(s => `${s.symbol}-${s.type}-${Math.floor(s.timestamp / 60_000)}`)
+        );
+        const fresh = incoming.filter(
+            s => !existingKeys.has(`${s.symbol}-${s.type}-${Math.floor(s.timestamp / 60_000)}`)
+        );
+        return [...fresh, ...existing];
+    }, []);
+
+    const fetchSignals = useCallback(async (exchangeId: string) => {
         if (document.hidden && !exchangeId.includes("-init") && !alertsEnabled) return;
 
         const cleanId = exchangeId.replace("-init", "");
         setLoading(true);
         try {
             const data = await getAdvancedSignalsAction(cleanId, timeframe);
+            if (data.length === 0) return;
+
             const now = Date.now();
+            const incoming = data.map(s => ({ ...s, timestamp: now }));
 
-            // Detect NEW signals before updating history
-            if (lastUpdate && data.length > 0) {
-                const firstNew = data.find(s => {
-                    const key = `${s.symbol}-${s.type}`;
-                    return !signalHistoryMap[key];
-                });
-                if (firstNew) {
-                    console.log(`🔔 Advanced Alert triggering for ${firstNew.symbol}`);
-                    triggerAlert(
-                        `New Signal: ${firstNew.symbol}`,
-                        `Advanced scan found ${firstNew.type} at $${firstNew.entryPrice.toFixed(4)}`
-                    );
-                }
-            }
+            setSignals(prev => mergeSignals(incoming, prev));
 
-            // Sync history map efficiently
-            setSignalHistoryMap(prev => {
-                const next = { ...prev };
-                data.forEach(s => {
-                    const key = `${s.symbol}-${s.type}`;
-                    next[key] = {
-                        firstSeen: prev[key]?.firstSeen || s.timestamp || now,
-                        lastUpdate: now
-                    };
-                });
-                return next;
-            });
-
-            setSignals(data);
-            setLastUpdate(new Date());
+            triggerAlert(
+                `New Signal: ${incoming[0].symbol}`,
+                `${incoming[0].type} at $${incoming[0].entryPrice.toFixed(4)} — ${incoming.length} signal(s) detected`
+            );
         } catch (error) {
             console.error("Failed to fetch signals", error);
-            // toast.error("Failed to update signals");
         } finally {
             setLoading(false);
         }
-    };
+    }, [timeframe, alertsEnabled, mergeSignals, triggerAlert]);
 
     useEffect(() => {
-        if (selectedExchange) {
-            fetchSignals(selectedExchange + "-init");
-            const interval = setInterval(() => fetchSignals(selectedExchange), 60000);
-            return () => clearInterval(interval);
+        if (!selectedExchange) return;
+        let cancelled = false;
+
+        setSignals([]);
+        setHistoryLoaded(false);
+
+        const init = async () => {
+            // 1. Load full DB history first (fast SQLite read)
+            const stored = await getStoredAdvancedSignalsAction(selectedExchange, timeframe);
+            if (cancelled) return;
+            if (stored.length > 0) setSignals(stored);
+            setHistoryLoaded(true);
+
+            // 2. Kick off live scan after history is in state
+            if (!cancelled) fetchSignals(selectedExchange + "-init");
+        };
+
+        init();
+        const interval = setInterval(() => fetchSignals(selectedExchange), 60_000);
+        return () => {
+            cancelled = true;
+            clearInterval(interval);
+        };
+    }, [selectedExchange, timeframe]);
+
+    const handleLoadHistory = useCallback(async () => {
+        setLoadingHistory(true);
+        try {
+            const stored = await getStoredAdvancedSignalsAction(selectedExchange, timeframe);
+            if (stored.length > 0) {
+                setSignals(prev => {
+                    const existingKeys = new Set(
+                        prev.map(s => `${s.symbol}-${s.type}-${Math.floor(s.timestamp / 60_000)}`)
+                    );
+                    const newStored = stored.filter(
+                        s => !existingKeys.has(`${s.symbol}-${s.type}-${Math.floor(s.timestamp / 60_000)}`)
+                    );
+                    return [...prev, ...newStored];
+                });
+            }
+        } finally {
+            setLoadingHistory(false);
         }
     }, [selectedExchange, timeframe]);
 
-
     const filteredSignals = useMemo(() => {
-        if (!searchQuery.trim()) return signals;
-        const query = searchQuery.toLowerCase();
-        return signals.filter((signal) =>
-            signal.symbol.toLowerCase().includes(query)
-        );
-    }, [signals, searchQuery]);
+        return signals.filter((signal) => {
+            if (filterType !== "ALL" && signal.type !== filterType) return false;
+            if (signal.score < minScore) return false;
+            if (searchQuery.trim()) {
+                const q = searchQuery.toLowerCase();
+                if (!signal.symbol.toLowerCase().includes(q)) return false;
+            }
+            return true;
+        });
+    }, [signals, searchQuery, filterType, minScore]);
 
     const stats = useMemo(() => {
         return {
@@ -313,16 +326,49 @@ Score: ${signal.score}/100`;
                                 </div>
                             </div>
 
-                            <div className="flex items-center gap-2">
+                            <div className="flex items-center gap-3">
+                                {/* DB stats pill */}
+                                <div className="hidden sm:flex items-center gap-3 px-4 py-2 rounded-xl bg-muted/50 border border-border/40 text-[11px] font-mono">
+                                    <div className="flex flex-col items-center gap-0.5">
+                                        <span className="text-[9px] text-muted-foreground/50 uppercase tracking-widest">STORED</span>
+                                        <span className="font-bold text-foreground leading-none">{signals.length}</span>
+                                    </div>
+                                    <div className="w-px h-6 bg-border/40" />
+                                    <div className="flex flex-col items-center gap-0.5">
+                                        <span className="text-[9px] text-muted-foreground/50 uppercase tracking-widest">BUY</span>
+                                        <span className="font-bold text-green-500 leading-none">{signals.filter(s => s.type === "BUY").length}</span>
+                                    </div>
+                                    <div className="w-px h-6 bg-border/40" />
+                                    <div className="flex flex-col items-center gap-0.5">
+                                        <span className="text-[9px] text-muted-foreground/50 uppercase tracking-widest">SELL</span>
+                                        <span className="font-bold text-red-500 leading-none">{signals.filter(s => s.type === "SELL").length}</span>
+                                    </div>
+                                    <div className="w-px h-6 bg-border/40" />
+                                    <div className="flex flex-col items-center gap-0.5">
+                                        <span className="text-[9px] text-muted-foreground/50 uppercase tracking-widest">DB</span>
+                                        <span className={cn("font-bold leading-none", historyLoaded ? "text-primary" : "text-muted-foreground/40")}>
+                                            {historyLoaded ? "✓" : "…"}
+                                        </span>
+                                    </div>
+                                </div>
+
+                                <Button
+                                    variant="outline"
+                                    size="sm"
+                                    onClick={handleLoadHistory}
+                                    disabled={loadingHistory}
+                                    className="h-8 px-3 text-xs gap-1.5"
+                                >
+                                    <Database className={cn("h-3.5 w-3.5", loadingHistory && "animate-pulse")} />
+                                    <span className="hidden md:inline">{loadingHistory ? "Loading…" : "DB History"}</span>
+                                </Button>
+
                                 <Button
                                     variant="outline"
                                     size="sm"
                                     onClick={() => fetchSignals(selectedExchange + "-init")}
                                     disabled={loading}
-                                    className={cn(
-                                        "h-8 px-3 text-xs",
-                                        loading && "opacity-80"
-                                    )}
+                                    className={cn("h-8 px-3 text-xs", loading && "opacity-80")}
                                 >
                                     <RefreshCw className={cn("h-3.5 w-3.5 md:mr-2", loading && "animate-spin")} />
                                     <span className="hidden md:inline">Refresh</span>
@@ -369,11 +415,12 @@ Score: ${signal.score}/100`;
                     </div>
 
                     <div className="flex flex-col gap-3 p-3 bg-card/60 border border-border/40 rounded-xl backdrop-blur-sm shadow-sm">
+                        {/* Row 1: search + timeframe + stats */}
                         <div className="hidden md:grid grid-cols-12 items-center gap-6">
                             <div className="col-span-4 relative">
                                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground/60" />
                                 <Input
-                                    placeholder="Search details..."
+                                    placeholder="Search symbol..."
                                     value={searchQuery}
                                     onChange={(e) => setSearchQuery(e.target.value)}
                                     className="pl-9 h-9 bg-background/40 border-border/50 text-xs w-full focus:bg-background/80 transition-all rounded-lg"
@@ -416,6 +463,73 @@ Score: ${signal.score}/100`;
                                 </div>
                             </div>
                         </div>
+
+                        {/* Row 2: filters */}
+                        <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-border/30">
+                            <Filter className="h-3.5 w-3.5 text-muted-foreground/40 shrink-0" />
+
+                            {/* Direction */}
+                            <span className="text-[10px] text-muted-foreground/50 uppercase tracking-widest font-semibold">Direction</span>
+                            <div className="flex items-center gap-0.5 p-0.5 bg-muted/40 rounded-lg border border-border/40">
+                                {(["ALL", "BUY", "SELL"] as const).map((t) => (
+                                    <button
+                                        key={t}
+                                        type="button"
+                                        onClick={() => setFilterType(t)}
+                                        className={cn(
+                                            "flex items-center gap-1 px-3 py-1 text-[10px] font-bold rounded-md transition-colors outline-none select-none uppercase tracking-widest",
+                                            filterType === t
+                                                ? t === "BUY"
+                                                    ? "bg-green-500/20 text-green-500"
+                                                    : t === "SELL"
+                                                        ? "bg-red-500/20 text-red-500"
+                                                        : "bg-background text-foreground shadow-sm"
+                                                : "text-muted-foreground hover:text-foreground hover:bg-background/40"
+                                        )}
+                                    >
+                                        {t === "BUY" && <TrendingUp className="h-3 w-3" />}
+                                        {t === "SELL" && <TrendingDown className="h-3 w-3" />}
+                                        {t}
+                                    </button>
+                                ))}
+                            </div>
+
+                            {/* Divider */}
+                            <span className="w-px h-4 bg-border/40 mx-1" />
+
+                            {/* Min Score */}
+                            <span className="text-[10px] text-muted-foreground/50 uppercase tracking-widest font-semibold">Min Score</span>
+                            <div className="flex items-center gap-0.5 p-0.5 bg-muted/40 rounded-lg border border-border/40">
+                                {[60, 70, 80, 90].map((score) => (
+                                    <button
+                                        key={score}
+                                        type="button"
+                                        onClick={() => setMinScore(score)}
+                                        className={cn(
+                                            "px-3 py-1 text-[10px] font-bold rounded-md transition-colors outline-none select-none",
+                                            minScore === score
+                                                ? "bg-background text-foreground shadow-sm"
+                                                : "text-muted-foreground hover:text-foreground hover:bg-background/40"
+                                        )}
+                                    >
+                                        {score}+
+                                    </button>
+                                ))}
+                            </div>
+
+                            {/* Reset — only shown when filters differ from defaults */}
+                            {(filterType !== "ALL" || minScore !== 60) && (
+                                <button
+                                    type="button"
+                                    onClick={() => { setFilterType("ALL"); setMinScore(60); }}
+                                    className="ml-1 flex items-center gap-1 px-2.5 py-1 text-[10px] font-bold uppercase tracking-widest rounded-md outline-none select-none text-muted-foreground border border-border/50 hover:border-border hover:text-foreground transition-colors"
+                                >
+                                    <RefreshCw className="h-2.5 w-2.5" />
+                                    Reset
+                                </button>
+                            )}
+
+                        </div>
                     </div>
 
                     <Card className="border-border/40 bg-card/40 backdrop-blur-sm overflow-hidden shadow-xl rounded-xl">
@@ -431,7 +545,7 @@ Score: ${signal.score}/100`;
                                     <Table className="relative">
                                         <TableHeader className="bg-muted/50 sticky top-0 z-10 backdrop-blur-md">
                                             <TableRow className="border-border/40 hover:bg-transparent h-10">
-                                                <TableHead className="pl-6 h-10 w-[110px] text-[11px] font-bold uppercase tracking-wider text-muted-foreground">
+                                                <TableHead className="pl-6 h-10 w-[145px] text-[11px] font-bold uppercase tracking-wider text-muted-foreground">
                                                     <Tooltip>
                                                         <TooltipTrigger className="flex items-center gap-1 cursor-help">
                                                             Time <HelpCircle className="h-3 w-3 opacity-50" />
@@ -523,7 +637,6 @@ Score: ${signal.score}/100`;
                                                     key={`${signal.symbol}-${signal.type}-${idx}`}
                                                     signal={signal}
                                                     idx={idx}
-                                                    signalHistoryMap={signalHistoryMap}
                                                     onClick={() => copySignal(signal)}
                                                 />
                                             ))}

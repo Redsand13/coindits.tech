@@ -3,6 +3,23 @@ import db from "../db";
 
 const BINANCE_FAPI_BASE = "https://fapi.binance.com/fapi/v1";
 
+// Scans the full EMA arrays and returns EVERY crossover point (not just the most recent)
+function detectAllCrossoversInData(
+  ema7Array: number[],
+  ema99Array: number[],
+): Array<{ type: "BUY" | "SELL"; index: number; ema7At: number; ema99At: number }> {
+  const result: Array<{ type: "BUY" | "SELL"; index: number; ema7At: number; ema99At: number }> = [];
+  const len = Math.min(ema7Array.length, ema99Array.length);
+  for (let i = 100; i < len; i++) {
+    const p7 = ema7Array[i - 1], p99 = ema99Array[i - 1];
+    const c7 = ema7Array[i],    c99 = ema99Array[i];
+    if (!p7 || !p99 || !c7 || !c99) continue;
+    if (p7 <= p99 && c7 > c99) result.push({ type: "BUY",  index: i, ema7At: c7, ema99At: c99 });
+    else if (p7 >= p99 && c7 < c99) result.push({ type: "SELL", index: i, ema7At: c7, ema99At: c99 });
+  }
+  return result;
+}
+
 interface BinanceTicker {
   symbol: string;
   lastPrice: string;
@@ -158,28 +175,29 @@ export async function getBinanceFuturesSignals(
 
     // Process pairs in parallel batches for speed
     const batchSize = 20; // Process 20 pairs at once
-    const results: (MASignal | null)[] = [];
+    type BatchResult = { signal: MASignal | null; historical: Array<{ coinId: string; symbol: string; name: string; image: string; signalType: "BUY" | "SELL"; signalName: string; price: number; crossoverTimestamp: number; change24h: number; volume24h: number }> };
+    const results: BatchResult[] = [];
 
     console.log(`🚀 Analyzing ${topPairs.length} Binance Futures pairs in parallel batches...`);
 
     for (let i = 0; i < topPairs.length; i += batchSize) {
       const batch = topPairs.slice(i, i + batchSize);
 
-      const batchPromises = batch.map(async (pair) => {
+      const batchPromises = batch.map(async (pair): Promise<BatchResult> => {
+        const empty: BatchResult = { signal: null, historical: [] };
         try {
-          // Fetch 500 candles for better EMA convergence
-          // Fetch 500 candles for better EMA convergence
+          // Fetch 1500 candles for full historical coverage (~15 days on 15m)
           const klineRes = await fetch(
-            `${BINANCE_FAPI_BASE}/klines?symbol=${pair.symbol}&interval=${interval}&limit=500`,
+            `${BINANCE_FAPI_BASE}/klines?symbol=${pair.symbol}&interval=${interval}&limit=1500`,
           );
-          if (!klineRes.ok) return null;
+          if (!klineRes.ok) return empty;
 
           const klines: BinanceKline[] = await klineRes.json();
           // Parse closes
           const closes = klines.map((k) => parseFloat(k[4]));
 
           // Need enough data for 99 EMA + convergence
-          if (closes.length < 200) return null;
+          if (closes.length < 200) return empty;
 
           const prices = closes;
           const currentPrice = prices[prices.length - 1];
@@ -188,7 +206,32 @@ export async function getBinanceFuturesSignals(
           const ema7Array = calculateEMAArray(prices, 7);
           const ema99Array = calculateEMAArray(prices, 99);
 
-          if (ema7Array.length < 100 || ema99Array.length < 100) return null;
+          if (ema7Array.length < 100 || ema99Array.length < 100) return empty;
+
+          // Metadata lookup (needed for both live signal and historical entries)
+          const rawSymbol = pair.symbol.replace("USDT", "");
+          const hardcoded = BINANCE_TO_COINGECKO[pair.symbol];
+          const dynamic = findCoinMetadata(rawSymbol);
+          const finalName = dynamic?.name || (hardcoded?.id ? hardcoded.id.split('-').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ') : rawSymbol);
+          const finalImage = dynamic?.image || hardcoded?.image || "";
+
+          // ── Collect ALL historical crossovers across full kline window ──
+          const allCrossovers = detectAllCrossoversInData(ema7Array, ema99Array);
+          const historical = allCrossovers.map(c => {
+            const histSignalName = c.type === "BUY" ? "Golden Cross (Historical)" : "Death Cross (Historical)";
+            return {
+              coinId: pair.symbol,
+              symbol: rawSymbol,
+              name: finalName,
+              image: finalImage,
+              signalType: c.type as "BUY" | "SELL",
+              signalName: histSignalName,
+              price: c.ema7At, // price-at-crossover approximated by EMA7
+              crossoverTimestamp: klines[c.index][0] as number,
+              change24h: parseFloat(pair.priceChangePercent),
+              volume24h: parseFloat(pair.quoteVolume),
+            };
+          });
 
           // Calculate RSI
           const rsi = calculateRSI(prices, 14);
@@ -201,11 +244,11 @@ export async function getBinanceFuturesSignals(
           if (timeframe === "4h") lookback = 6;
           if (timeframe === "1d") lookback = 2;
 
-          // Detect Crossover
+          // Detect Crossover (most recent, within lookback window)
           const crossover = detectCrossover(ema7Array, ema99Array, lookback);
 
-          // Skip if no crossover found in window
-          if (!crossover.type) return null;
+          // Skip live signal if no recent crossover
+          if (!crossover.type) return { signal: null, historical };
 
           const signalType: "BUY" | "SELL" = crossover.type;
 
@@ -233,10 +276,6 @@ export async function getBinanceFuturesSignals(
           } else {
             crossoverStrength = ((ema99 - ema7) / ema99) * 100;
           }
-
-          // NO TREND SIGNALS - User requested ONLY fresh crossovers.
-
-
 
           const volatility = calculateVolatility(prices);
           // Calculate entry, stop loss, and take profit based on signal type
@@ -293,54 +332,48 @@ export async function getBinanceFuturesSignals(
             change1h = ((currentPrice - oldPrice) / oldPrice) * 100;
           }
 
-          // Calculate accurate crossover timestamp
           // Use the actual candle timestamp where the crossover occurred
-          const crossoverTimestamp = klines[crossover.index][0];
+          const crossoverTimestamp = klines[crossover.index][0] as number;
 
           const dailyData = await fetchBinanceKlines(pair.symbol, "1d");
           const volMetric = calculateVolatilityScore(dailyData, currentPrice, parseFloat(pair.quoteVolume), parseFloat(pair.priceChangePercent));
 
-          // Metadata lookup
-          const rawSymbol = pair.symbol.replace("USDT", "");
-          const hardcoded = BINANCE_TO_COINGECKO[pair.symbol];
-          const dynamic = findCoinMetadata(rawSymbol);
-
-          const finalName = dynamic?.name || (hardcoded?.id ? hardcoded.id.split('-').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ') : rawSymbol);
-          const finalImage = dynamic?.image || hardcoded?.image || "";
-
           return {
-            coinId: pair.symbol,
-            symbol: rawSymbol,
-            name: finalName,
-            image: finalImage,
-            signalType,
-            signalName,
-            timeframe,
-            score,
-            price: currentPrice,
-            currentPrice: currentPrice,
-            change1h: change1h,
-            change24h: parseFloat(pair.priceChangePercent),
-            change7d: 0,
-            volume24h: parseFloat(pair.quoteVolume),
-            marketCap: 0,
-            timestamp: Date.now(),
-            crossoverTimestamp,
-            candlesAgo: crossover.candlesAgo,
-            entryPrice,
-            stopLoss,
-            takeProfit,
-            volatility: volMetric.score,
-            volatilityTooltip: volMetric.tooltip,
-            formula: `EMA7/99 | RSI: ${Math.round(rsi)}`,
-            ema7,
-            ema99,
-            ema7Prev,
-            ema99Prev,
-            crossoverStrength,
-          } as MASignal;
+            signal: {
+              coinId: pair.symbol,
+              symbol: rawSymbol,
+              name: finalName,
+              image: finalImage,
+              signalType,
+              signalName,
+              timeframe,
+              score,
+              price: currentPrice,
+              currentPrice: currentPrice,
+              change1h: change1h,
+              change24h: parseFloat(pair.priceChangePercent),
+              change7d: 0,
+              volume24h: parseFloat(pair.quoteVolume),
+              marketCap: 0,
+              timestamp: Date.now(),
+              crossoverTimestamp,
+              candlesAgo: crossover.candlesAgo,
+              entryPrice,
+              stopLoss,
+              takeProfit,
+              volatility: volMetric.score,
+              volatilityTooltip: volMetric.tooltip,
+              formula: `EMA7/99 | RSI: ${Math.round(rsi)}`,
+              ema7,
+              ema99,
+              ema7Prev,
+              ema99Prev,
+              crossoverStrength,
+            } as MASignal,
+            historical,
+          };
         } catch (err) {
-          return null;
+          return empty;
         }
       });
 
@@ -353,25 +386,29 @@ export async function getBinanceFuturesSignals(
       }
     }
 
-    const validSignals = results.filter((s): s is MASignal => s !== null && s.score >= 60);
+    const validSignals = results
+      .map(r => r.signal)
+      .filter((s): s is MASignal => s !== null && s.score >= 60);
 
-    // Sort
     // Sort by Time (Newest First) as requested
     validSignals.sort((a, b) => b.crossoverTimestamp - a.crossoverTimestamp);
 
     console.log(`✅ Found ${validSignals.length} Binance Futures signals (${validSignals.filter(s => s.signalType === 'BUY').length} BUY, ${validSignals.filter(s => s.signalType === 'SELL').length} SELL)`);
 
-    // 💾 Persist to signal_history table
+    // 💾 Persist live signals + all historical crossovers to signal_history
     try {
       const stmt = db.prepare(`
         INSERT OR IGNORE INTO signal_history (
-          id, coin_id, symbol, name, image, signal_type, signal_name, timeframe, 
+          id, coin_id, symbol, name, image, signal_type, signal_name, timeframe,
           score, price, crossover_timestamp, first_seen, metadata
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
 
-      const insertMany = db.transaction((signals: MASignal[]) => {
-        for (const s of signals) {
+      const now = Date.now();
+
+      const insertAll = db.transaction(() => {
+        // Insert live signals (with full metadata)
+        for (const s of validSignals) {
           const uniqueId = `${s.coinId}-${s.signalType}-${s.crossoverTimestamp}`;
           const metadata = JSON.stringify({
             volatility: s.volatility,
@@ -385,17 +422,34 @@ export async function getBinanceFuturesSignals(
             change24h: s.change24h,
             volume24h: s.volume24h
           });
-
           stmt.run(
-            uniqueId, s.coinId, s.symbol, s.name, s.image, 
-            s.signalType, s.signalName, timeframe, 
-            s.score, s.price, s.crossoverTimestamp, Date.now(), metadata
+            uniqueId, s.coinId, s.symbol, s.name, s.image,
+            s.signalType, s.signalName, timeframe,
+            s.score, s.price, s.crossoverTimestamp, now, metadata
           );
         }
+
+        // Insert all historical crossovers found across the full kline window
+        const allHistorical = results.flatMap(r => r.historical);
+        let histInserted = 0;
+        for (const h of allHistorical) {
+          const uniqueId = `${h.coinId}-${h.signalType}-${h.crossoverTimestamp}`;
+          const metadata = JSON.stringify({
+            change24h: h.change24h,
+            volume24h: h.volume24h,
+          });
+          stmt.run(
+            uniqueId, h.coinId, h.symbol, h.name, h.image,
+            h.signalType, h.signalName, timeframe,
+            60, // default score for historical entries (meets minimum threshold)
+            h.price, h.crossoverTimestamp, now, metadata
+          );
+          histInserted++;
+        }
+        console.log(`💾 Persisted ${validSignals.length} live + ${histInserted} historical signals to history DB`);
       });
 
-      insertMany(validSignals);
-      console.log(`💾 Persisted ${validSignals.length} signals to history DB`);
+      insertAll();
     } catch (err) {
       console.error("❌ Failed to persist signals to history DB:", err);
     }

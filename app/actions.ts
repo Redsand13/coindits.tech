@@ -8,7 +8,7 @@ import {
 } from "@/lib/services/coingecko";
 import type { MASignal } from "@/lib/services/coingecko";
 import { getAdvancedSignalsAction as getAdvancedSignalsService } from "@/lib/services/advanced-algo";
-import type { Timeframe } from "@/lib/services/advanced-algo";
+import type { AdvancedSignal, Timeframe } from "@/lib/services/advanced-algo";
 import { withCache } from "@/lib/utils/cache";
 import db from "@/lib/db";
 import bcrypt from "bcryptjs";
@@ -147,8 +147,79 @@ export async function getBinanceFuturesSignalsAction(timeframe: string = "1h") {
   }
 }
 
+// ─── helpers (sync, better-sqlite3 is synchronous) ───────────────────────────
+
+function persistAdvancedSignals(signals: AdvancedSignal[], exchange: string, timeframe: string) {
+  try {
+    const stmt = db.prepare(`
+      INSERT OR IGNORE INTO advanced_signals
+        (id, symbol, exchange, timeframe, signal_type, entry_price, stop_loss, take_profit,
+         rr_ratio, score, reason, image, link, detected_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    const run = db.transaction((rows: AdvancedSignal[]) => {
+      for (const s of rows) {
+        // Deduplicate per 1-minute window per symbol+exchange+type+timeframe
+        const bucket = Math.floor(s.timestamp / 60_000);
+        const id = `${s.symbol}-${exchange}-${s.type}-${timeframe}-${bucket}`;
+        stmt.run(
+          id, s.symbol, exchange, timeframe, s.type,
+          s.entryPrice, s.stopLoss, s.takeProfit, s.rrRatio,
+          s.score, JSON.stringify(s.reason),
+          s.image ?? null, s.link, s.timestamp
+        );
+      }
+    });
+    run(signals);
+  } catch (err) {
+    console.error("[db] persistAdvancedSignals failed:", err);
+  }
+}
+
+// ─── public actions ───────────────────────────────────────────────────────────
+
 export async function getAdvancedSignalsAction(exchangeId?: string, timeframe: string = "15m") {
-  return await getAdvancedSignalsService(exchangeId, timeframe);
+  try {
+    const exchange = exchangeId ?? "binance_futures";
+    const results = await getAdvancedSignalsService(exchange, timeframe);
+    if (results.length > 0) persistAdvancedSignals(results, exchange, timeframe);
+    return results;
+  } catch (error) {
+    console.error("[action] getAdvancedSignalsAction failed:", error);
+    return [];
+  }
+}
+
+export async function getStoredAdvancedSignalsAction(exchangeId: string, timeframe: string): Promise<AdvancedSignal[]> {
+  try {
+    const rows = db.prepare(`
+      SELECT * FROM advanced_signals
+      WHERE exchange = ? AND timeframe = ?
+      ORDER BY detected_at DESC
+      LIMIT 1000
+    `).all(exchangeId, timeframe) as any[];
+
+    return rows.map(r => ({
+      symbol:      r.symbol,
+      exchange:    r.exchange,
+      type:        r.signal_type as "BUY" | "SELL",
+      entryPrice:  r.entry_price,
+      stopLoss:    r.stop_loss,
+      takeProfit:  r.take_profit,
+      rrRatio:     r.rr_ratio,
+      score:       r.score,
+      reason:      JSON.parse(r.reason || "[]") as string[],
+      timestamp:   r.detected_at,
+      status:      "ACTIVE" as const,
+      currentPrice: r.entry_price,
+      link:        r.link ?? "",
+      chartData:   [],
+      image:       r.image ?? undefined,
+    }));
+  } catch (error) {
+    console.error("[action] getStoredAdvancedSignalsAction failed:", error);
+    return [];
+  }
 }
 
 
