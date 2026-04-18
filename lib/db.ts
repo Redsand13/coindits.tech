@@ -99,6 +99,12 @@ try {
       detected_at INTEGER NOT NULL,
       created_at INTEGER DEFAULT (strftime('%s', 'now') * 1000)
     );
+
+    CREATE TABLE IF NOT EXISTS kv_store (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_at INTEGER DEFAULT (strftime('%s', 'now') * 1000)
+    );
   `);
 
   console.log('✅ SQLite Database initialized at ' + dbPath);

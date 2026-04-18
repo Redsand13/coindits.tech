@@ -2,13 +2,32 @@ import { MASignal, getBinanceCoinMapping, calculateEMAArray, detectCrossover, ca
 import db from "../db";
 
 const BINANCE_FAPI_BASE = "https://fapi.binance.com/fapi/v1";
+const BAN_KEY = "binance_ip_ban_until";
 
 // ── IP ban tracking ───────────────────────────────────────────────────────────
-// Binance returns 418 with a ban-until timestamp when an IP is blocked.
-// We store it here so every subsequent call short-circuits without hitting the wire.
+// The ban timestamp is persisted in SQLite so server restarts / HMR don't reset it.
+// A module-level variable acts as a fast in-process cache of the DB value.
 let _ipBanUntil = 0;
 
+function loadBanFromDb(): void {
+  try {
+    const row = db.prepare("SELECT value FROM kv_store WHERE key = ?").get(BAN_KEY) as { value: string } | undefined;
+    if (row) _ipBanUntil = parseInt(row.value, 10) || 0;
+  } catch { /* DB not ready yet — will retry next call */ }
+}
+
+function saveBanToDb(until: number): void {
+  try {
+    db.prepare("INSERT OR REPLACE INTO kv_store (key, value, updated_at) VALUES (?, ?, ?)").run(BAN_KEY, String(until), Date.now());
+  } catch (e) { console.error("Failed to persist Binance ban timestamp:", e); }
+}
+
+// Load once on module init
+loadBanFromDb();
+
 export function getBinanceBanStatus(): { banned: boolean; banUntil: number | null } {
+  // Re-read DB on every check so restarts pick it up immediately
+  loadBanFromDb();
   if (_ipBanUntil > Date.now()) return { banned: true, banUntil: _ipBanUntil };
   return { banned: false, banUntil: null };
 }
@@ -39,13 +58,16 @@ async function fetchWithRetry(url: string, options: RequestInit & { timeoutMs?: 
 
     const body = await res.text().catch(() => "");
 
-    // 418 = IP banned — parse and store the expiry, stop retrying immediately
+    // 418 = IP banned — parse and persist the expiry, stop retrying immediately
     if (res.status === 418) {
       try {
         const json = JSON.parse(body);
         if (typeof json.msg === "string") {
           const match = json.msg.match(/banned until (\d+)/);
-          if (match) _ipBanUntil = parseInt(match[1], 10);
+          if (match) {
+            _ipBanUntil = parseInt(match[1], 10);
+            saveBanToDb(_ipBanUntil);
+          }
         }
       } catch { /* ignore parse errors */ }
       const banDate = _ipBanUntil ? new Date(_ipBanUntil).toUTCString() : "unknown";

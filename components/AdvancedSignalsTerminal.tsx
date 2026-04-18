@@ -393,13 +393,14 @@ Score: ${signal.score}/100`;
                                 <button
                                     key={ex.id}
                                     onClick={() => ex.status === 'active' && setSelectedExchange(ex.id)}
-                                    disabled={ex.status === "coming_soon"}
+                                    disabled={ex.status !== 'active'}
+                                    title={ex.status === 'banned' ? 'Temporarily unavailable — API access restricted' : undefined}
                                     className={cn(
                                         "flex items-center px-4 py-1.5 text-xs font-semibold rounded-lg transition-all whitespace-nowrap",
                                         selectedExchange === ex.id
                                             ? "bg-background text-foreground shadow-sm ring-1 ring-border/50"
                                             : "text-muted-foreground hover:text-foreground hover:bg-background/50",
-                                        ex.status === "coming_soon" && "opacity-50 cursor-not-allowed"
+                                        (ex.status === "coming_soon" || ex.status === "banned") && "opacity-50 cursor-not-allowed"
                                     )}
                                 >
                                     <img
@@ -409,6 +410,7 @@ Score: ${signal.score}/100`;
                                     />
                                     {ex.name}
                                     {ex.status === "coming_soon" && <span className="ml-1.5 opacity-70 text-[9px] uppercase tracking-wide">Soon</span>}
+                                    {ex.status === "banned" && <span className="ml-1.5 opacity-70 text-[9px] uppercase tracking-wide text-red-400">Unavailable</span>}
                                 </button>
                             ))}
                         </div>
